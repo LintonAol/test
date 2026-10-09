@@ -11,33 +11,45 @@ namespace HackerNewsBestStories.Tests;
 
 public class BestStoriesEndpointTests : IClassFixture<WebApplicationFactory<Program>>
 {
-    private readonly HttpClient _http;
+    private const string BestStoriesUrl = "/api/stories/best";
 
-    public BestStoriesEndpointTests(WebApplicationFactory<Program> factory)
-    {
-        var fake = new FakeHackerNewsClient(Item(1, 10), Item(2, 30), Item(3, 20));
-        _http = factory
-            .WithWebHostBuilder(b => b.ConfigureServices(s =>
+    private readonly WebApplicationFactory<Program> _factory;
+
+    public BestStoriesEndpointTests(WebApplicationFactory<Program> factory) => _factory = factory;
+
+    private HttpClient BuildClient(IHackerNewsClient hackerNews, int? maxStoryCount = null) =>
+        _factory.WithWebHostBuilder(builder =>
+        {
+            if (maxStoryCount is not null)
             {
-                s.RemoveAll<IHackerNewsClient>();
-                s.AddSingleton<IHackerNewsClient>(fake);
-            }))
-            .CreateClient();
+                builder.UseSetting("HackerNews:MaxStoryCount", maxStoryCount.ToString());
+            }
+
+            builder.ConfigureServices(services =>
+            {
+                services.RemoveAll<IHackerNewsClient>();
+                services.AddSingleton(hackerNews);
+            });
+        }).CreateClient();
+
+    private static FakeHackerNewsClient BuildThreeStoryFake() => new(BuildStory(1, 10), BuildStory(2, 30), BuildStory(3, 20));
+
+    [Fact]
+    public async Task BestStories_Get_WithValidCount_ReturnsFirstStoriesFromHackerNewsByScoreDescending()
+    {
+        var client = BuildClient(BuildThreeStoryFake());
+
+        var stories = await client.GetFromJsonAsync<List<BestStoryResponse>>($"{BestStoriesUrl}?count=2");
+
+        Assert.Equal([30, 10], stories!.Select(story => story.Score));
     }
 
     [Fact]
-    public async Task Returns_best_stories_in_descending_score_order()
+    public async Task BestStories_Get_ForAStory_UsesTheDocumentedJsonPropertyNames()
     {
-        var stories = await _http.GetFromJsonAsync<List<BestStoryResponse>>("/api/stories/best?count=2");
+        var client = BuildClient(BuildThreeStoryFake());
 
-        Assert.Equal(2, stories!.Count);
-        Assert.True(stories[0].Score >= stories[1].Score);
-    }
-
-    [Fact]
-    public async Task Serialises_with_the_documented_property_names()
-    {
-        var json = await _http.GetStringAsync("/api/stories/best?count=1");
+        var json = await client.GetStringAsync($"{BestStoriesUrl}?count=1");
 
         Assert.Contains("\"commentCount\":7", json);
         Assert.Contains("\"postedBy\":\"author\"", json);
@@ -50,10 +62,41 @@ public class BestStoriesEndpointTests : IClassFixture<WebApplicationFactory<Prog
     [InlineData("?count=-1")]
     [InlineData("?count=201")]
     [InlineData("?count=abc")]
-    public async Task Rejects_invalid_count(string query)
+    public async Task BestStories_Get_WithMissingOrInvalidCount_ReturnsBadRequest(string query)
     {
-        var response = await _http.GetAsync("/api/stories/best" + query);
+        var client = BuildClient(BuildThreeStoryFake());
+
+        var response = await client.GetAsync(BestStoriesUrl + query);
 
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Get_WithCountAboveConfiguredMaximum_ReturnsBadRequest()
+    {
+        var client = BuildClient(BuildThreeStoryFake(), maxStoryCount: 2);
+
+        var response = await client.GetAsync($"{BestStoriesUrl}?count=3");
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+    [Fact]
+    public async Task BestStories_Get_WithCountEqualToConfiguredMaximum_ReturnsOk()
+    {
+        var client = BuildClient(BuildThreeStoryFake(), maxStoryCount: 2);
+
+        var response = await client.GetAsync($"{BestStoriesUrl}?count=2");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+    }
+    [Fact]
+    public async Task BestStories_Get_WhenHackerNewsIsUnavailable_ReturnsBadGateway()
+    {
+        var failingFake = new FakeHackerNewsClient(BuildStory(1, 10)) { Failure = new HttpRequestException("down") };
+        var client = BuildClient(failingFake);
+
+        var response = await client.GetAsync($"{BestStoriesUrl}?count=1");
+
+        Assert.Equal(HttpStatusCode.BadGateway, response.StatusCode);
     }
 }

@@ -1,57 +1,68 @@
+using HackerNewsBestStories.Api.Models;
 using HackerNewsBestStories.Api.Services;
+using Microsoft.Extensions.Logging.Abstractions;
 using static HackerNewsBestStories.Tests.FakeHackerNewsClient;
 
 namespace HackerNewsBestStories.Tests;
 
 public class BestStoriesServiceTests
 {
+    private static BestStoriesService BuildService(IHackerNewsClient hackerNews) =>
+        new(hackerNews, NullLogger<BestStoriesService>.Instance);
+
     [Fact]
-    public async Task Returns_requested_number_of_stories_sorted_by_score_descending()
+    public async Task GetBestStoriesAsync_WhenIdsAreNotInScoreOrder_ReturnsStoriesByScoreDescending()
     {
-        var service = new BestStoriesService(new FakeHackerNewsClient(Item(1, 10), Item(2, 30), Item(3, 20)));
+        var service = BuildService(
+            new FakeHackerNewsClient(BuildStory(1, 10), BuildStory(2, 30), BuildStory(3, 20)));
 
-        var result = await service.GetBestStoriesAsync(3, CancellationToken.None);
+        var stories = await service.GetBestStoriesAsync(3, CancellationToken.None);
 
-        Assert.Equal([30, 20, 10], result.Select(s => s.Score));
+        Assert.Equal([30, 20, 10], stories.Select(story => story.Score));
     }
-
     [Fact]
-    public async Task Fetches_only_the_first_n_ids()
+    public async Task BestStoriesService_GetBestStoriesAsync_WhenCountIsBelowAvailable_FetchesOnlyThatManyStories()
     {
-        var client = new FakeHackerNewsClient(Item(1, 10), Item(2, 30), Item(3, 20));
-        var service = new BestStoriesService(client);
+        var hackerNews = new FakeHackerNewsClient(BuildStory(1, 10), BuildStory(2, 30), BuildStory(3, 20));
+        var service = BuildService(hackerNews);
 
-        var result = await service.GetBestStoriesAsync(2, CancellationToken.None);
+        var stories = await service.GetBestStoriesAsync(2, CancellationToken.None);
 
-        Assert.Equal(2, result.Count);
-        Assert.Equal(2, client.ItemCalls);
+        Assert.Equal(2, stories.Count);
+        Assert.Equal(2, hackerNews.ItemCallCount);
     }
-
     [Fact]
-    public async Task Returns_all_available_when_n_exceeds_available_stories()
+    public async Task BestStoriesService_GetBestStoriesAsync_WhenCountExceedsAvailable_ReturnsEverythingAvailable()
     {
-        var service = new BestStoriesService(new FakeHackerNewsClient(Item(1, 10)));
+        var service = BuildService(new FakeHackerNewsClient(BuildStory(1, 10)));
 
-        var result = await service.GetBestStoriesAsync(50, CancellationToken.None);
+        var stories = await service.GetBestStoriesAsync(50, CancellationToken.None);
 
-        Assert.Single(result);
+        Assert.Single(stories);
     }
-
     [Fact]
-    public async Task Skips_stories_that_no_longer_exist()
+    public async Task BestStoriesService_GetBestStoriesAsync_WhenAStoryHasBeenRemoved_LeavesItOut()
     {
-        var client = new FakeHackerNewsClient(Item(1, 10), Item(2, 20));
-        var service = new BestStoriesService(new MissingItemClient(client, missingId: 2));
+        var hackerNews = new FakeHackerNewsClient(BuildStory(1, 10), BuildStory(2, 20));
+        var service = BuildService(new RemovedStoryClient(hackerNews, removedId: 2));
 
-        var result = await service.GetBestStoriesAsync(2, CancellationToken.None);
+        var stories = await service.GetBestStoriesAsync(2, CancellationToken.None);
 
-        Assert.Equal(10, Assert.Single(result).Score);
+        Assert.Equal(10, Assert.Single(stories).Score);
     }
-
     [Fact]
-    public async Task Maps_item_fields_to_response()
+    public async Task BestStoriesService_GetBestStoriesAsync_WhenHackerNewsFails_PropagatesTheException()
     {
-        var service = new BestStoriesService(new FakeHackerNewsClient(Item(1, 10)));
+        var hackerNews = new FakeHackerNewsClient(BuildStory(1, 10)) { Failure = new HttpRequestException("down") };
+        var service = BuildService(hackerNews);
+
+        await Assert.ThrowsAsync<HttpRequestException>(
+            () => service.GetBestStoriesAsync(1, CancellationToken.None));
+    }
+    [Fact]
+    public async Task BestStoriesService_GetBestStoriesAsync_ForAStory_MapsHackerNewsFieldsToResponse()
+    {
+        var service = BuildService(new FakeHackerNewsClient(BuildStory(1, 10)));
 
         var story = Assert.Single(await service.GetBestStoriesAsync(1, CancellationToken.None));
 
@@ -63,11 +74,12 @@ public class BestStoriesServiceTests
         Assert.Equal(7, story.CommentCount);
     }
 
-    private sealed class MissingItemClient(IHackerNewsClient inner, long missingId) : IHackerNewsClient
+    private sealed class RemovedStoryClient(IHackerNewsClient inner, long removedId) : IHackerNewsClient
     {
-        public Task<IReadOnlyList<long>> GetBestStoryIdsAsync(CancellationToken ct) => inner.GetBestStoryIdsAsync(ct);
+        public Task<IReadOnlyList<long>> GetBestStoryIdsAsync(CancellationToken cancellationToken) =>
+            inner.GetBestStoryIdsAsync(cancellationToken);
 
-        public Task<Api.Models.HackerNewsItem?> GetItemAsync(long id, CancellationToken ct) =>
-            id == missingId ? Task.FromResult<Api.Models.HackerNewsItem?>(null) : inner.GetItemAsync(id, ct);
+        public Task<HackerNewsItem?> GetItemAsync(long id, CancellationToken cancellationToken) =>
+            id == removedId ? Task.FromResult<HackerNewsItem?>(null) : inner.GetItemAsync(id, cancellationToken);
     }
 }

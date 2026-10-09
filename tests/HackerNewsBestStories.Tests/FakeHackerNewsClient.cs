@@ -3,39 +3,45 @@ using HackerNewsBestStories.Api.Services;
 
 namespace HackerNewsBestStories.Tests;
 
-/// <summary>In-memory stand-in for Hacker News that records how often it is called.</summary>
+/// <summary>In-memory Hacker News client for tests,counts calls and can be held open or made to fail.</summary>
 internal sealed class FakeHackerNewsClient : IHackerNewsClient
 {
-    private readonly Dictionary<long, HackerNewsItem> _items;
-    private readonly List<long> _ids;
-    private int _idCalls;
-    private int _itemCalls;
+    private readonly Dictionary<long, HackerNewsItem> _itemsById;
+    private readonly List<long> _bestStoryIds;
+    private int _idsCallCount;
+    private int _itemCallCount;
 
     public FakeHackerNewsClient(params HackerNewsItem[] items)
     {
-        _items = items.ToDictionary(item => item.Id);
-        _ids = items.Select(item => item.Id).ToList();
+        _itemsById = items.ToDictionary(item => item.Id);
+        _bestStoryIds = items.Select(item => item.Id).ToList();
     }
 
+    /// <summary>While set every call waits for this to complete.</summary>
     public TaskCompletionSource? Gate { get; set; }
-    public int IdCalls => _idCalls;
-    public int ItemCalls => _itemCalls;
+
+    /// <summary>When set every call throws this instead of returning data.</summary>
+    public Exception? Failure { get; set; }
+
+    public int IdsCallCount => _idsCallCount;
+
+    public int ItemCallCount => _itemCallCount;
 
     public async Task<IReadOnlyList<long>> GetBestStoryIdsAsync(CancellationToken cancellationToken)
     {
-        Interlocked.Increment(ref _idCalls);
-        if (Gate is not null) await Gate.Task;
-        return _ids;
+        Interlocked.Increment(ref _idsCallCount);
+        await WaitForGateAsync();
+        return _bestStoryIds;
     }
 
     public async Task<HackerNewsItem?> GetItemAsync(long id, CancellationToken cancellationToken)
     {
-        Interlocked.Increment(ref _itemCalls);
-        if (Gate is not null) await Gate.Task;
-        return _items.GetValueOrDefault(id);
+        Interlocked.Increment(ref _itemCallCount);
+        await WaitForGateAsync();
+        return _itemsById.GetValueOrDefault(id);
     }
 
-    public static HackerNewsItem Item(long id, int score) => new()
+    public static HackerNewsItem BuildStory(long id, int score) => new()
     {
         Id = id,
         Title = $"Story {id}",
@@ -45,4 +51,17 @@ internal sealed class FakeHackerNewsClient : IHackerNewsClient
         Score = score,
         Descendants = 7,
     };
+
+    private async Task WaitForGateAsync()
+    {
+        if (Gate is not null)
+        {
+            await Gate.Task;
+        }
+
+        if (Failure is not null)
+        {
+            throw Failure;
+        }
+    }
 }

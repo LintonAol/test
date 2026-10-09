@@ -1,89 +1,100 @@
 # Hacker News Best Stories API
 
-ASP.NET Core (.NET 10) REST API that returns the top *n* Hacker News "best stories", ordered by score (highest first).
+A REST API built with ASP.NET Core and .NET 10 to return the top `n` Hacker News stories, ordered by score.
 
 ## Run
 
 Requires the .NET 10 SDK.
 
 ```bash
-dotnet run --project src/HackerNewsBestStories.Api --urls http://localhost:5246
+./run.sh
+```
+
+The API runs on port `5246`.
+
+## Use the API
+
+Get the top 10 stories:
+
+```bash
 curl "http://localhost:5246/api/stories/best?count=10"
 ```
 
-## Test
+Get the top 5 stories:
+
+```bash
+curl "http://localhost:5246/api/stories/best?count=5"
+```
+
+The `count` parameter is required and must be between `1` and `200` by default. Added validation for it.
+
+In GitHub Codespaces(if this is env), open port `5246` and use the forwarded URL instead of `localhost`.
+
+## Tests
+
+Run the tests with:
+
+```bash
+./run.sh test
+```
+
+Or run direct cmdline:
 
 ```bash
 dotnet test
 ```
 
-## API
+## API responses
 
-`GET /api/stories/best?count={n}`
+| Status | Description |
+|---|---|
+| `200 OK` | Returns stories ordered by score |
+| `400 Bad Request` | Missing or invalid `count` |
+| `502 Bad Gateway` | Hacker News API request failed |
+If any error, it will be logged. There is no pattern given for the errorcode.
 
-| Status | Meaning |
-|--------|---------|
-| 200 | JSON array of up to `n` stories, descending by score |
-| 400 | `count` missing or not an integer in `1..200` |
-| 502 | Hacker News could not be reached |
+Example response:
 
 ```json
 [
   {
-    "title": "A uBlock Origin update was rejected from the Chrome Web Store",
-    "uri": "https://github.com/uBlockOrigin/uBlock-issues/issues/745",
-    "postedBy": "ismaildonmez",
-    "time": "2019-10-12T13:43:01+00:00",
-    "score": 1716,
-    "commentCount": 572
+    "title": "Example story",
+    "uri": "https://example.com/story",
+    "postedBy": "username",
+    "time": "2026-01-01T12:00:00+00:00",
+    "score": 100,
+    "commentCount": 25
   }
 ]
 ```
 
 ## Design
 
-```
-BestStoriesController            HTTP, input validation, error mapping
-        |
-IBestStoriesService  ->  BestStoriesService      pick first n ids, fetch, sort, map
-        |
-IHackerNewsClient
-  +- CachedHackerNewsClient      decorator: cache + request coalescing
-        |
-     HackerNewsHttpClient        plain HttpClient calls to Hacker News
-```
+- **Controller:** Handles requests, validation and HTTP responses.
+- **Service:** Fetches story details, sorts by score and maps the response.
+- **HTTP client:** Calls the Hacker News API.
+- **Caching decorator:** Caches results and avoids duplicate concurrent requests.
 
-- **Interfaces at each seam** (`IBestStoriesService`, `IHackerNewsClient`) so every layer is unit-testable with a hand-written fake (`FakeHackerNewsClient`); no mocking framework needed.
-- **Decorator for caching** keeps `HackerNewsHttpClient` and `BestStoriesService` free of caching concerns.
-- **Protecting Hacker News**
-  - Best-story ids are cached for 1 minute, individual stories for 5 minutes (`HackerNews:BestStoryIdsCacheDuration`, `HackerNews:StoryCacheDuration`). Call volume to Hacker News is therefore independent of inbound request volume.
-  - Concurrent requests for the same key share one in-flight call (stampede protection). A caller that cancels stops waiting but does not cancel the shared call.
-  - A single shared `HttpClient` with `MaxConnectionsPerServer` (default 10) caps simultaneous outbound requests; extra calls queue.
-- **Response**: the item `time` (Unix seconds) is exposed as an ISO 8601 `DateTimeOffset`; `descendants` is exposed as `commentCount`.
-- Only the first `n` ids from `beststories.json` are fetched, then sorted by score locally to guarantee ordering.
+Interfaces keep the service and client easy to test. Tests use a simple fake client without a mocking framework.
 
-### Configuration (`appsettings.json`, section `HackerNews`)
+## Configuration
 
-| Key | Default |
-|-----|---------|
-| `BaseUrl` | `https://hacker-news.firebaseio.com/v0/` |
-| `MaxConcurrentRequests` | `10` |
-| `BestStoryIdsCacheDuration` | `00:01:00` |
-| `StoryCacheDuration` | `00:05:00` |
+The API settings are defined in `appsettings.json` under the `HackerNews` section.
 
-## Assumptions
+| Setting | Value | Purpose |
+|---|---|---|
+| `BaseUrl` | `https://hacker-news.firebaseio.com/v0/` | Hacker News API base URL |
+| `MaxConcurrentRequests` | `10` | Configured limit for outbound requests |
+| `MaxStoryCount` | `200` | Maximum number of stories requested |
+| `BestStoryIdsCacheDuration` | `00:01:00` | Cache duration for best-story IDs (1 minute) |
+| `StoryCacheDuration` | `00:05:00` | Cache duration for individual stories (5 minutes) |
 
-- `count` is required and limited to 1-200, since `beststories.json` returns at most 200 ids.
-- Scores/comment counts may be up to a few minutes stale; that trade-off is acceptable for a "best stories" list.
-- Stories that are deleted/missing (`null` from Hacker News) are skipped, so fewer than `n` results may be returned.
-- Stories without a URL (e.g. Ask HN) return `"uri": null`.
-- Any Hacker News failure fails the whole request (502) rather than returning partial data.
 
-## Enhancements with more time
+Deleted or missing stories are skipped, so the API may return fewer than the requested number. Stories without a URL return `null` for `uri`.
 
-- Distributed cache (e.g. Redis) when running multiple instances; serve stale data while refreshing in the background.
-- Resilience policies (retry with jitter, circuit breaker, timeouts) via `Microsoft.Extensions.Http.Resilience`.
-- Inbound rate limiting (`AddRateLimiter`) and response caching/ETags.
-- Cache the assembled response per `count`.
-- Health checks, structured logging/metrics, OpenAPI document, Dockerfile and CI pipeline.
-- Contract tests against a recorded Hacker News payload.
+## Possible improvements
+
+- Add Redis for caching across multiple instances.
+- Add retries, timeouts and a circuit breaker.
+
+

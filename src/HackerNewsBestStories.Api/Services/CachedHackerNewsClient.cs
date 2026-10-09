@@ -7,59 +7,107 @@ using Microsoft.Extensions.Options;
 namespace HackerNewsBestStories.Api.Services;
 
 /// <summary>
-/// Decorates another client with an in-memory cache and de-duplication of concurrent
-/// identical requests, so Hacker News sees at most one call per key per cache period.
+/// Adds caching to the Hacker News client and avoids fetching the same data multiple times when several requests arrive together.
 /// </summary>
 public sealed class CachedHackerNewsClient : IHackerNewsClient
 {
-    private const string BestStoryIdsKey = "best-story-ids";
+    private const string BestStoryIdsCacheKey = "best-story-ids";
 
-    private readonly IHackerNewsClient _inner;
-    private readonly IMemoryCache _cache;
+    private readonly IHackerNewsClient _innerClient;
+    private readonly IMemoryCache _memoryCache;
     private readonly HackerNewsOptions _options;
-    private readonly ConcurrentDictionary<string, object> _inFlight = new();
+    private readonly ILogger<CachedHackerNewsClient> _logger;
 
-    public CachedHackerNewsClient(IHackerNewsClient inner, IMemoryCache cache, IOptions<HackerNewsOptions> options)
+    // Keep track of requests that are already fetching the same data - so that multiple requests for the same key can share the same task.
+    private readonly ConcurrentDictionary<string, object> _inFlightRequests = new();
+
+    public CachedHackerNewsClient(
+        IHackerNewsClient innerClient,
+        IMemoryCache memoryCache,
+        IOptions<HackerNewsOptions> options,
+        ILogger<CachedHackerNewsClient> logger)
     {
-        _inner = inner;
-        _cache = cache;
+        _innerClient = innerClient;
+        _memoryCache = memoryCache;
         _options = options.Value;
+        _logger = logger;
     }
 
-    public Task<IReadOnlyList<long>> GetBestStoryIdsAsync(CancellationToken cancellationToken) =>
-        GetOrFetchAsync(BestStoryIdsKey, _options.BestStoryIdsCacheDuration,
-            () => _inner.GetBestStoryIdsAsync(CancellationToken.None), cancellationToken);
+    #region Public methods
 
-    public Task<HackerNewsItem?> GetItemAsync(long id, CancellationToken cancellationToken) =>
-        GetOrFetchAsync($"item:{id}", _options.StoryCacheDuration,
-            () => _inner.GetItemAsync(id, CancellationToken.None), cancellationToken);
+    public Task<IReadOnlyList<long>> GetBestStoryIdsAsync(CancellationToken cancellationToken)
+    {
+        return GetOrFetchAsync(
+            BestStoryIdsCacheKey,
+            _options.BestStoryIdsCacheDuration,
+            () => _innerClient.GetBestStoryIdsAsync(CancellationToken.None),
+            cancellationToken);
+    }
+
+    public Task<HackerNewsItem?> GetItemAsync(long id, CancellationToken cancellationToken)
+    {
+        return GetOrFetchAsync(
+            $"item:{id}",
+            _options.StoryCacheDuration,
+            () => _innerClient.GetItemAsync(id, CancellationToken.None),
+            cancellationToken);
+    }
+
+    #endregion
+
+    #region Private methods
 
     private async Task<T> GetOrFetchAsync<T>(
-        string key, TimeSpan duration, Func<Task<T>> fetch, CancellationToken cancellationToken)
+        string cacheKey,
+        TimeSpan cacheDuration,
+        Func<Task<T>> fetchData,
+        CancellationToken cancellationToken)
     {
-        if (_cache.TryGetValue(key, out T? cached))
+        // Return the cached value if we already have it.
+        if (_memoryCache.TryGetValue(cacheKey, out T? cachedValue))
         {
-            return cached!;
+            _logger.LogDebug("Cache hit for {CacheKey}.", cacheKey);
+            return cachedValue!;
         }
 
-        var lazy = (Lazy<Task<T>>)_inFlight.GetOrAdd(
-            key, _ => new Lazy<Task<T>>(() => FetchAndCacheAsync(key, duration, fetch)));
+        // If another request is fetching this key, reuse the same task.
+        // Otherwise, start a new fetch and let other requests share it.
+        var pendingRequest = (Lazy<Task<T>>)_inFlightRequests.GetOrAdd(
+            cacheKey,
+            _ => new Lazy<Task<T>>(
+                () => FetchAndCacheAsync(cacheKey, cacheDuration, fetchData)));
 
-        // The shared fetch ignores any single caller's token; each caller only stops waiting.
-        return await lazy.Value.WaitAsync(cancellationToken);
+        // A caller can stop waiting without cancelling the shared fetch
+        // that other requests may still need.
+        return await pendingRequest.Value.WaitAsync(cancellationToken);
     }
 
-    private async Task<T> FetchAndCacheAsync<T>(string key, TimeSpan duration, Func<Task<T>> fetch)
+    private async Task<T> FetchAndCacheAsync<T>(
+        string cacheKey,
+        TimeSpan cacheDuration,
+        Func<Task<T>> fetchData)
     {
         try
         {
-            var value = await fetch();
-            _cache.Set(key, value, duration);
-            return value;
+            _logger.LogDebug("Cache miss for {CacheKey}; fetching from Hacker News.", cacheKey);
+            var result = await fetchData();
+
+            // Cache the result so the next request can return it directly.
+            _memoryCache.Set(cacheKey, result, cacheDuration);
+
+            return result;
+        }
+        catch (Exception exception)
+        {
+            _logger.LogWarning(exception, "Fetching {CacheKey} from Hacker News failed.", cacheKey);
+            throw;
         }
         finally
         {
-            _inFlight.TryRemove(key, out _);
+            // Remove the in-flight entry so a later request can fetch again after a failure or when the cached value expires.
+            _inFlightRequests.TryRemove(cacheKey, out _);
         }
     }
+
+    #endregion
 }

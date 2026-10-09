@@ -7,7 +7,10 @@ var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddControllers();
 builder.Services.AddMemoryCache();
-builder.Services.Configure<HackerNewsOptions>(builder.Configuration.GetSection(HackerNewsOptions.SectionName));
+builder.Services.AddOptions<HackerNewsOptions>()
+    .Bind(builder.Configuration.GetSection(HackerNewsOptions.SectionName))
+    .ValidateDataAnnotations()
+    .ValidateOnStart();
 
 // A single shared HttpClient; the connection cap throttles outbound load on Hacker News.
 builder.Services.AddSingleton<IHackerNewsClient>(provider =>
@@ -25,7 +28,8 @@ builder.Services.AddSingleton<IHackerNewsClient>(provider =>
     return new CachedHackerNewsClient(
         new HackerNewsHttpClient(httpClient),
         provider.GetRequiredService<IMemoryCache>(),
-        options);
+        options,
+        provider.GetRequiredService<ILogger<CachedHackerNewsClient>>());
 });
 builder.Services.AddScoped<IBestStoriesService, BestStoriesService>();
 
